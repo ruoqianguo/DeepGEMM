@@ -52,7 +52,7 @@ static void __instantiate_kernel() {{
         {}, {},
         {},
         {}, {}, {},
-        {}
+        {}, {}
     >);
 }};
 )",
@@ -66,7 +66,8 @@ static void __instantiate_kernel() {{
         args.gemm_config.multicast_config.num_multicast, args.gemm_config.multicast_config.is_multicast_on_a,
         args.gemm_config.num_sms,
         to_string(args.gemm_config.gemm_type), args.gemm_config.with_accumulation, to_string(args.gemm_config.cd_dtype),
-        get_default_epilogue_type(args.epilogue_type));
+        get_default_epilogue_type(args.epilogue_type),
+        args.gemm_config.swap_ab);
     }
 
     static void launch_impl(const KernelHandle& kernel, const LaunchConfigHandle& config, Args args) {
@@ -86,13 +87,14 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
                                 const int& m, const int& n, const int& k,
                                 const cute::UMMA::Major& major_a, const cute::UMMA::Major& major_b,
                                 const std::string& compiled_dims,
-                                const std::optional<std::string>& epilogue_type = std::nullopt) {
+                                const std::optional<std::string>& epilogue_type = std::nullopt,
+                                const bool& swap_ab = false) {
     const auto& aligned_k = align(k, 128);
     const auto& config = get_best_config<SM100ArchSpec>(
         GemmType::Normal, KernelType::Kernel1D1D,
         m, n, k, 1, major_a, major_b,
         torch::kFloat8_e4m3fn, d.scalar_type(), c.has_value(),
-        device_runtime->get_num_sms());
+        device_runtime->get_num_sms(), swap_ab);
 
     const auto& cd = c.value_or(d);
     const auto& tensor_map_a = make_tma_a_desc(major_a, a, m, k,
@@ -105,16 +107,21 @@ static void sm100_fp8_gemm_1d1d(const torch::Tensor& a, const torch::Tensor& sfa
                                                config.block_k,
                                                static_cast<int>(b.stride(get_non_contiguous_dim(major_b))), 1,
                                                config.smem_config.swizzle_b_mode);
-    const auto& tensor_map_d = make_tma_cd_desc(d, m, static_cast<int>(d.size(-1)),
-                                                SM100ArchSpec::get_cd_store_block_m(config.block_m),
-                                                SM100ArchSpec::get_cd_store_block_n(config.block_n),
+    // Handle dimension swapping for transpose output
+    const int tma_m = swap_ab ? n : m;
+    const int tma_n = swap_ab ? m : n; 
+    const int tma_block_m = swap_ab ? config.smem_config.swizzle_cd_mode / d.element_size() : SM100ArchSpec::get_cd_store_block_m(config.block_m);
+    const int tma_block_n = swap_ab ? SM100ArchSpec::get_cd_store_block_m(config.block_m) : SM100ArchSpec::get_cd_store_block_n(config.block_n);
+    // swapab bm=64/128/256, actual swizzle_cd_mode=128
+    const int tma_swizzle_cd_mode = swap_ab ? 128 : config.smem_config.swizzle_cd_mode;
+    const auto& tensor_map_d = make_tma_cd_desc(d, tma_m, tma_n,
+                                                tma_block_m, tma_block_n,
                                                 static_cast<int>(d.stride(-2)), 1,
-                                                config.smem_config.swizzle_cd_mode);
-    const auto& tensor_map_c = make_tma_cd_desc(cd, m, n,
-                                                SM100ArchSpec::get_cd_store_block_m(config.block_m),
-                                                SM100ArchSpec::get_cd_store_block_n(config.block_n),
+                                                tma_swizzle_cd_mode);
+    const auto& tensor_map_c = make_tma_cd_desc(cd, tma_m, tma_n,
+                                                tma_block_m, tma_block_n,
                                                 static_cast<int>(cd.stride(-2)), 1,
-                                                config.smem_config.swizzle_cd_mode);
+                                                tma_swizzle_cd_mode);
     const auto& tensor_map_sfa = make_tma_sf_desc(cute::UMMA::Major::MN, sfa, m, k,
                                                   config.block_m, config.block_k, 1, 0);
     const auto& tensor_map_sfb = make_tma_sf_desc(cute::UMMA::Major::MN, sfb, n, k,

@@ -102,6 +102,24 @@ def enumerate_normal(dtype: torch.dtype) -> Generator:
                 yield override_kernel_type, n, m, k, override_major,     override_major, True,  torch.float        # Wgrad
                 yield override_kernel_type, n, m, k, override_major,     override_major, False, torch.bfloat16     # Wgrad
 
+def enumerate_normal_compare_with_swapab() -> Generator:
+    for kernel_type in (KernelType.Kernel1D1D, ):
+        for m in (1, 2, 4, 8, 16, 24, 32, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128):
+            for k, n in [(7168, 2112), (1536, 24576), (512, 32768), (16384, 7168), (7168, 4096),(2048, 7168), (1024, 1024)]:
+                for major_a, major_b in [(MajorTypeAB.KMajor, MajorTypeAB.KMajor),]:
+                    for out_dtype in (torch.bfloat16,):
+                        for accumulate in (False, ) if out_dtype == torch.bfloat16 or kernel_type.is_1d2d() else (False, True):
+                            yield kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype
+
+def enumerate_normal_swapab() -> Generator:
+    for kernel_type in (KernelType.Kernel1D1D, ):
+        for m in (1, 2, 4, 8, 16, 24, 32, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128):
+            for k, n in [(7168, 2112), (1536, 24576), (512, 32768), (16384, 7168), (7168, 4096),(2048, 7168), (1024, 1024)]:
+                for major_a, major_b in [(MajorTypeAB.KMajor, MajorTypeAB.KMajor),]:
+                    for out_dtype in (torch.bfloat16,):
+                        for accumulate in (False, ) if out_dtype == torch.bfloat16 or kernel_type.is_1d2d() else (False, True):
+                            yield kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype
+
 
 def enumerate_m_grouped_contiguous(dtype: torch.dtype) -> Generator:
     for kernel_type in get_kernel_types(dtype):
