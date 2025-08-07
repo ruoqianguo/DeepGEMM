@@ -22,8 +22,7 @@ from deep_gemm_cpp import (
 
 # Kernels
 from deep_gemm_cpp import (
-    # FP8 GEMMs
-    fp8_gemm_nt, fp8_gemm_nn,
+    fp8_gemm_nt, fp8_gemm_nn, fp8_gemm_ntt,
     fp8_gemm_tn, fp8_gemm_tt,
     fp8_gemm_nt_skip_head_mid,
     m_grouped_fp8_gemm_nt_contiguous,

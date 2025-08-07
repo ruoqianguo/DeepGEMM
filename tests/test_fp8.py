@@ -11,8 +11,9 @@ from deep_gemm.testing import (
 
 from generators import (
     KernelType, get_arch_major, get_ue8m0_usage,
-    enumerate_normal, enumerate_m_grouped_contiguous, enumerate_m_grouped_masked, enumerate_k_grouped_contiguous,
-    generate_normal, generate_m_grouped_contiguous, generate_m_grouped_masked, generate_k_grouped_contiguous
+    enumerate_normal,enumerate_m_grouped_contiguous, enumerate_m_grouped_masked, enumerate_k_grouped_contiguous,
+    generate_normal, generate_m_grouped_contiguous, generate_m_grouped_masked, generate_k_grouped_contiguous,
+    enumerate_normal_compare_with_swapab, enumerate_normal_swapab
 )
 
 
@@ -47,6 +48,97 @@ def test_gemm() -> None:
         print(f' > Perf (m={m:6}, n={n:6}, k={k:6}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}): '
               f'{t * 1e6:4.0f} us | {2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
               f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | '
+              f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
+    print()
+
+def test_gemm_performance() -> None:
+    print('Testing GEMM performance:')
+    for kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype in enumerate_normal_compare_with_swapab():
+        major_opt  = 'N' if major_a.is_k_major() else 'T'
+        major_opt += 'T' if major_b.is_k_major() else 'N'
+        out_opt    = 'FP32' if out_dtype == torch.float else 'BF16'
+        acc_opt    = f'acc={int(accumulate)}'
+        kernel_opt = f'1D1D' if kernel_type.is_1d1d() else '1D2D'
+        use_ue8m0 = get_ue8m0_usage(kernel_type)
+        disable_ue8m0_cast = not use_ue8m0
+
+        for test_alias in (False, True):
+            a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0)
+            func_name = f'fp8_gemm_{major_opt.lower() if test_alias else "nt"}'
+            if test_alias:
+                a = a if major_a.is_k_major() else (a[0].T, a[1].T)
+                b = b if major_b.is_k_major() else (b[0].T, b[1].T)
+                assert a[0].is_contiguous() and b[0].is_contiguous()
+            getattr(deep_gemm, func_name)(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+            diff = calc_diff(d, ref_d)
+            assert diff < 0.001, (f'{m=}, {n=}, {k=}, {kernel_opt}, {major_opt=}, {accumulate=}, {out_dtype=}, '
+                                  f'{diff:.5f}, alias={test_alias}')
+        a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0)
+
+        # Test launch overhead
+        launch_start_t = time.time_ns()
+        deep_gemm.fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+        launch_end_t = time.time_ns()
+        torch.cuda.synchronize()
+
+        # noinspection PyShadowingNames
+        def test_func():
+            deep_gemm.fp8_gemm_nt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+
+        t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
+        cublas_t, split_k_t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a[0], b[0], d, c=c), ('nvjet', 'reduce'), suppress_kineto_output=True)
+        print(f' > Perf (m={m:5}, n={n:5}, k={k:5}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}): '
+              f'launch {(launch_end_t - launch_start_t) / 1e3:4.0f} us | {t * 1e6:4.0f} us | '
+              f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
+              f'{(count_bytes(a, b, d) + count_bytes(c) * int(accumulate)) / 1e9 / t:4.0f} GB/s | '
+              f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
+    print()
+
+def test_gemm_swapab_performance() -> None:
+    print('Testing GEMM with swap_ab:')
+    for kernel_type, m, n, k, major_a, major_b, accumulate, out_dtype in enumerate_normal_swapab():
+        major_opt  = 'N' if major_a.is_k_major() else 'T'
+        major_opt += 'T' if major_b.is_k_major() else 'N'
+        out_opt    = 'FP32' if out_dtype == torch.float else 'BF16'
+        acc_opt    = f'acc={int(accumulate)}'
+        kernel_opt = f'1D1D' if kernel_type.is_1d1d() else '1D2D'
+        use_ue8m0 = get_ue8m0_usage(kernel_type)
+        disable_ue8m0_cast = not use_ue8m0
+
+        for test_alias in (False, True):
+            a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0)
+            func_name = f'fp8_gemm_{major_opt.lower() if test_alias else "nt"}t'
+            if test_alias:
+                a = a if major_a.is_k_major() else (a[0].T, a[1].T)
+                b = b if major_b.is_k_major() else (b[0].T, b[1].T)
+                assert a[0].is_contiguous() and b[0].is_contiguous()
+            getattr(deep_gemm, func_name)(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+            diff = calc_diff(d, ref_d)
+            assert diff < 0.001, (f'{m=}, {n=}, {k=}, {kernel_opt}, {major_opt=}, {accumulate=}, {out_dtype=}, '
+                                  f'{diff:.5f}, alias={test_alias}')
+        a, b, c, d, ref_d = generate_normal(m, n, k, major_a, major_b, accumulate, out_dtype, kernel_type, use_ue8m0=use_ue8m0)
+        # a: (m, k)  major_a: 可能是KMajor，也可能是MNMajor
+        # b: (n, k)
+        # c: (m, n)
+        # d: (m, n)
+        # ref_d: (m, n)
+
+        # Test launch overhead
+        launch_start_t = time.time_ns()
+        deep_gemm.fp8_gemm_ntt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+        launch_end_t = time.time_ns()
+        torch.cuda.synchronize()
+
+        # noinspection PyShadowingNames
+        def test_func():
+            deep_gemm.fp8_gemm_ntt(a, b, d, c=c, disable_ue8m0_cast=disable_ue8m0_cast)
+
+        t = bench_kineto(test_func, 'fp8_gemm', suppress_kineto_output=True)
+        cublas_t, split_k_t = bench_kineto(lambda: deep_gemm.cublaslt_gemm_nt(a[0], b[0], d, c=c), ('nvjet', 'reduce'), suppress_kineto_output=True)
+        print(f' > Perf (m={m:5}, n={n:5}, k={k:5}, {kernel_opt}, layout={major_opt}, {out_opt}, {acc_opt}):'
+              f' launch {(launch_end_t - launch_start_t) / 1e3:4.0f} us | {t * 1e6:4.0f} us | '
+              f'{2 * m * n * k / t / 1e12:4.0f} TFLOPS | '
+              f'{count_bytes(a, b, c, d) / 1e9 / t:4.0f} GB/s | '
               f'{(cublas_t + split_k_t) / t:.2f}x cuBLAS')
     print()
 
@@ -166,7 +258,9 @@ if __name__ == '__main__':
     print('Library path:')
     print(f' > {deep_gemm.__path__}\n')
 
-    test_gemm()
-    test_m_grouped_gemm_contiguous()
-    test_m_grouped_gemm_masked()
-    test_k_grouped_gemm_contiguous()
+    # test_gemm()
+    test_gemm_performance()
+    test_gemm_swapab_performance()
+    # test_m_grouped_gemm_contiguous()
+    # test_m_grouped_gemm_masked()
+    # test_k_grouped_gemm_contiguous()
