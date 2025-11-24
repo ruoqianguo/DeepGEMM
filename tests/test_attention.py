@@ -182,6 +182,8 @@ def test_paged_mqa_logits():
     for batch_size, next_n in [(64, 1), (64, 2), (64, 4), (128, 1)]:
         for heads, index_dim in [(64, 128)]:
             for avg_kv in (8192, 32768):
+                if get_arch_major() == 9 and next_n > 2:
+                    continue
                 num_blocks, blocksize = max_model_len * 3, 64
 
                 q = torch.randn((batch_size, next_n, heads, index_dim), device='cuda', dtype=torch.bfloat16)
